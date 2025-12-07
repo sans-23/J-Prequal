@@ -15,12 +15,18 @@ import java.util.concurrent.TimeUnit;
 public class SimulationRunner {
 
     private static final int NUM_SERVERS = 1000;
-    private static final int NUM_REQUESTS = 1000000000;
+    private static final int NUM_REQUESTS = 1_000_000;
     private static final int CONCURRENCY = 2000; // Simultaneous clients
 
     public static void main(String[] args) throws InterruptedException {
         System.out.println("=== J-Prequal Simulation ===");
 
+        System.out.println("Running with " + CONCURRENCY + " clients");
+        System.out.println("Running with " + NUM_REQUESTS + " requests");
+        System.out.println("Running with " + NUM_SERVERS + " servers");
+
+        runSimulation(new com.jprequal.strategies.RoundRobinStrategy());
+        System.out.println("--------------------------------------------------");
         runSimulation(new LeastConnectionsStrategy());
         System.out.println("--------------------------------------------------");
         runSimulation(new PrequalStrategy());
@@ -43,6 +49,20 @@ public class SimulationRunner {
 
         long startBenchmark = System.currentTimeMillis();
 
+        // Warmup Phase (20% of requests, not counted)
+        System.out.println("Warming up...");
+        int warmupRequests = NUM_REQUESTS / 5;
+        for (int i = 0; i < warmupRequests; i++) {
+            executor.submit(() -> {
+                ServerNode selected = lb.selectServer();
+                if (selected != null) {
+                    selected.handleRequest();
+                }
+            });
+        }
+
+        // Measurement Phase
+        System.out.println("Measuring...");
         for (int i = 0; i < NUM_REQUESTS; i++) {
             executor.submit(() -> {
                 long start = System.nanoTime();

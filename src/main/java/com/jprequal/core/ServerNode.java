@@ -18,9 +18,10 @@ public class ServerNode {
     // Simulation parameters
     private static final int BASE_LATENCY_MS = 10;
     // 2s pause every ~10s roughly?
+    // 2s pause every ~10s roughly?
     // Let's say 5% of time is GC.
-    private static final int GC_PAUSE_MS = 200;
-    private static final int GC_INTERVAL_MS = 1000;
+    private static final int GC_PAUSE_MS = 50;
+    private static final int GC_INTERVAL_MS = 100;
 
     // Readers (requests) blocked by Writer (GC)
     private final ReentrantReadWriteLock stwLock = new ReentrantReadWriteLock();
@@ -83,6 +84,26 @@ public class ServerNode {
             Thread.currentThread().interrupt();
         } finally {
             stwLock.writeLock().unlock();
+        }
+    }
+
+    /**
+     * Prequal Probe: Returns estimated latency.
+     * Simulates a real network probe: if we can't get a read lock immediately,
+     * it means server is paused or about to pause (Writer waiting).
+     */
+    public com.jprequal.strategies.ProbeResult probe() {
+        // Simulate network probe
+        if (!stwLock.readLock().tryLock()) {
+            // Server is stalled/GCing
+            return new com.jprequal.strategies.ProbeResult(this, activeRequests.get(), 10_000_000_000L,
+                    System.nanoTime()); // 10s penalty
+        }
+        try {
+            long latencyEst = (long) activeRequests.get() * BASE_LATENCY_MS * 1_000_000L; // ns
+            return new com.jprequal.strategies.ProbeResult(this, activeRequests.get(), latencyEst, System.nanoTime());
+        } finally {
+            stwLock.readLock().unlock();
         }
     }
 
