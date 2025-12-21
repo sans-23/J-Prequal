@@ -1,18 +1,12 @@
 package com.jprequal;
 
-import com.jprequal.core.LoadBalancer;
-import com.jprequal.core.ServerNode;
 import com.jprequal.core.SimulationConfig;
 import com.jprequal.strategies.LeastConnectionsStrategy;
 import com.jprequal.strategies.PrequalStrategy;
 import com.jprequal.strategies.RoundRobinStrategy;
-import org.apache.commons.math3.stat.descriptive.DescriptiveStatistics;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 
 public class SimulationRunner {
 
@@ -79,116 +73,16 @@ public class SimulationRunner {
                             !exp.name().equals("PoolSizeSweep");
 
                     if (runBaselines) {
-                        runSimulation(exp.name(), config, new RoundRobinStrategy(), "RoundRobin", writer);
-                        runSimulation(exp.name(), config, new LeastConnectionsStrategy(), "LeastConnections", writer);
-                        runSimulation(exp.name(), config, new com.jprequal.strategies.P2CLeastConnectionsStrategy(),
+                        Simulator.run(exp.name(), config, new RoundRobinStrategy(), "RoundRobin", writer);
+                        Simulator.run(exp.name(), config, new LeastConnectionsStrategy(), "LeastConnections", writer);
+                        Simulator.run(exp.name(), config, new com.jprequal.strategies.P2CLeastConnectionsStrategy(),
                                 "P2CLeastConnections", writer);
                     }
 
-                    runSimulation(exp.name(), config, new PrequalStrategy(config), "Prequal", writer);
+                    Simulator.run(exp.name(), config, new PrequalStrategy(config), "Prequal", writer);
                     writer.flush();
                 }
             }
-        }
-    }
-
-    private static void runSimulation(String experimentName, SimulationConfig config, LoadBalancer lb,
-            String strategyName, java.io.PrintWriter writer)
-            throws InterruptedException {
-        // setup
-        List<ServerNode> nodes = new ArrayList<>();
-        boolean isHeterogeneous = "HeterogeneitySweep".equals(experimentName);
-
-        for (int i = 0; i < config.numServers(); i++) {
-            int latency = config.baseLatencyMs();
-            if (isHeterogeneous && i >= config.numServers() / 2) {
-                latency = 100; // slow half
-            }
-
-            ServerNode node = new ServerNode("Server-" + i, latency, config);
-            lb.addServer(node);
-            nodes.add(node);
-        }
-
-        ExecutorService executor = Executors.newFixedThreadPool(config.numClients(), Thread.ofVirtual().factory());
-        DescriptiveStatistics stats = new DescriptiveStatistics();
-        final int numRequests = config.numRequests();
-
-        // warmup (20%)
-        int warmupRequests = numRequests / 5;
-        try {
-            List<java.util.concurrent.Callable<Object>> warmupTasks = new ArrayList<>();
-            for (int i = 0; i < warmupRequests; i++) {
-                warmupTasks.add(Executors.callable(() -> {
-                    ServerNode selected = lb.selectServer();
-                    if (selected != null) {
-                        selected.handleRequest();
-                    }
-                }));
-            }
-            executor.invokeAll(warmupTasks);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-
-        long startTime = System.nanoTime();
-
-        java.util.concurrent.atomic.AtomicInteger completed = new java.util.concurrent.atomic.AtomicInteger(0);
-
-        for (int i = 0; i < numRequests; i++) {
-            executor.submit(() -> {
-                long start = System.nanoTime();
-
-                ServerNode selected = lb.selectServer();
-                if (selected != null) {
-                    selected.handleRequest();
-                }
-
-                long duration = System.nanoTime() - start;
-                long durationMs = TimeUnit.NANOSECONDS.toMillis(duration);
-                synchronized (stats) {
-                    stats.addValue(durationMs);
-                }
-                int c = completed.incrementAndGet();
-                if (c % 10000 == 0) {
-                    System.out.println("Experiment " + experimentName + " [" + strategyName + "]: Finished " + c + "/"
-                            + numRequests);
-                }
-            });
-        }
-
-        executor.shutdown();
-        executor.awaitTermination(1, TimeUnit.MINUTES);
-
-        long totalTimeNs = System.nanoTime() - startTime;
-        double totalTimeSec = totalTimeNs / 1_000_000_000.0;
-        double throughput = numRequests / totalTimeSec;
-
-        // report
-        long slowRequests = 0;
-        for (double v : stats.getValues()) {
-            if (v > 100)
-                slowRequests++;
-        }
-
-        double errorRate = 0.0;
-
-        writer.printf("%s,%s,%s,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%d%n",
-                experimentName,
-                config.toString().replace(",", "|"), // Escape csv commas in record toString
-                strategyName,
-                throughput,
-                stats.getPercentile(50),
-                stats.getPercentile(90),
-                stats.getPercentile(99),
-                stats.getPercentile(99.9),
-                stats.getMax(),
-                errorRate,
-                slowRequests);
-
-        // cleanup
-        for (ServerNode node : nodes) {
-            node.stop();
         }
     }
 }
