@@ -14,23 +14,39 @@ public class LeastConnectionsStrategy implements LoadBalancer {
         servers.add(server);
     }
 
+    // ~100us per server probe overhead
+    private final long scanOverheadNs = 100_000;
+
     @Override
     public ServerNode selectServer() {
-        ServerNode bestServer = null;
+        if (servers.isEmpty())
+            return null;
+
+        // O(n) scan cost
+        long totalOverheadNs = servers.size() * scanOverheadNs;
+        try {
+            long millis = totalOverheadNs / 1_000_000;
+            int nanos = (int) (totalOverheadNs % 1_000_000);
+            Thread.sleep(millis, nanos);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+
+        ServerNode best = null;
         int minConnections = Integer.MAX_VALUE;
 
         for (ServerNode server : servers) {
-            int active = server.getActiveRequests();
-            if (active < minConnections) {
-                minConnections = active;
-                bestServer = server;
+            int connections = server.getActiveRequests();
+            if (connections < minConnections) {
+                minConnections = connections;
+                best = server;
             }
         }
-        return bestServer;
+        return best;
     }
 
     @Override
     public String getName() {
-        return "Least Connections";
+        return "LeastConnections (Full Scan)";
     }
 }

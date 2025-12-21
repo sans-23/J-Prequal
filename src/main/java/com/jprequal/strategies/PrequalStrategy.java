@@ -14,22 +14,27 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 public class PrequalStrategy implements LoadBalancer {
     private final List<ServerNode> servers = new ArrayList<>();
 
-    // Prequal Parameters
-    private static final int POOL_SIZE = 16;
-    private static final int R_PROBE = 3;
-    private static final double Q_RIF_QUANTILE = 0.8;
+    private final int poolSize;
+    private final int rProbe;
+    private final double qRifQuantile;
 
-    // Executor for async probing
-    // private final ExecutorService probeExecutor =
-    // Executors.newVirtualThreadPerTaskExecutor();
+    public PrequalStrategy(com.jprequal.core.SimulationConfig config) {
+        this.poolSize = config.prequalPoolSize();
+        this.rProbe = config.prequalProbeCount();
+        this.qRifQuantile = config.prequalQuantile();
+        this.clientState = ThreadLocal.withInitial(() -> new ClientState(poolSize, rProbe));
+    }
 
-    // ThreadLocal State per Client Thread
-    private final ThreadLocal<ClientState> clientState = ThreadLocal.withInitial(ClientState::new);
+    private final ThreadLocal<ClientState> clientState;
 
     private static class ClientState {
-        final List<ProbeResult> pool = new ArrayList<>(POOL_SIZE + R_PROBE);
+        final List<ProbeResult> pool;
         final Queue<ProbeResult> inbox = new ConcurrentLinkedQueue<>();
         final Random random = new Random();
+
+        ClientState(int poolSize, int rProbe) {
+            this.pool = new ArrayList<>(poolSize + rProbe);
+        }
     }
 
     @Override
@@ -44,16 +49,15 @@ public class PrequalStrategy implements LoadBalancer {
 
         ClientState state = clientState.get();
 
-        // 1. Drain Inbox to Pool
+        // drain async probe results
         ProbeResult inboxItem;
         while ((inboxItem = state.inbox.poll()) != null) {
             addProbeToPool(state.pool, inboxItem);
         }
 
-        // 2. Trigger Async Probes
         triggerAsyncProbes(state);
 
-        // 3. Select from Pool
+        // pick from pool or fallback to random
         ServerNode selected;
         if (state.pool.size() < 2) {
             selected = servers.get(state.random.nextInt(servers.size()));
@@ -65,35 +69,31 @@ public class PrequalStrategy implements LoadBalancer {
     }
 
     private void triggerAsyncProbes(ClientState state) {
-        // Capture inbox reference for closure
         Queue<ProbeResult> inbox = state.inbox;
 
-        for (int i = 0; i < R_PROBE; i++) {
+        for (int i = 0; i < rProbe; i++) {
             ServerNode target = servers.get(state.random.nextInt(servers.size()));
-            // OPTIMIZATION: In this in-memory simulation, probing is non-blocking (tryLock)
-            // and significantly
-            // faster than scheduling a Virtual Thread. We run it inline to simulate
-            // satisfying "IO offload".
+            // inline probe - non-blocking tryLock is fast enough
             ProbeResult result = target.probe();
             inbox.add(result);
         }
     }
 
     private void addProbeToPool(List<ProbeResult> pool, ProbeResult result) {
-        while (pool.size() >= POOL_SIZE) {
-            pool.remove(0); // Removing oldest
+        while (pool.size() >= poolSize) {
+            pool.remove(0); // FIFO eviction
         }
         pool.add(result);
     }
 
+    // Hot-Cold Lexicographic selection per paper
     private ServerNode applyHCLRule(List<ProbeResult> pool) {
-        // HCL Logic on local pool (No lock needed)
         List<Integer> rifs = new ArrayList<>();
         for (ProbeResult p : pool)
             rifs.add(p.rif());
         Collections.sort(rifs);
 
-        int index = (int) Math.ceil(Q_RIF_QUANTILE * (rifs.size() - 1));
+        int index = (int) Math.ceil(qRifQuantile * (rifs.size() - 1));
         int qRif = rifs.get(index);
 
         List<ProbeResult> hot = new ArrayList<>();
@@ -114,7 +114,7 @@ public class PrequalStrategy implements LoadBalancer {
             best = cold.stream().min(Comparator.comparingLong(ProbeResult::latencyNs)).orElse(cold.get(0));
         }
 
-        pool.remove(best);
+        // pool.remove(best); // optional: probe reuse
         return best.server();
     }
 

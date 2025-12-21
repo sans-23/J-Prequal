@@ -4,10 +4,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.Random;
 
-/**
- * Represents a dummy backend server.
- * Simulates random 'Stop-the-World' GC pauses INDEPENDENT of requests.
- */
+//Simulates a backend server with random STW GC pauses.
 public class ServerNode {
     private final String id;
     private final AtomicInteger activeRequests = new AtomicInteger(0);
@@ -15,28 +12,30 @@ public class ServerNode {
     private final Thread gcThread;
     private volatile boolean running = true;
 
-    // Simulation parameters
-    private static final int BASE_LATENCY_MS = 10;
-    // 2s pause every ~10s roughly?
-    // 2s pause every ~10s roughly?
-    // Let's say 5% of time is GC.
-    private static final int GC_PAUSE_MS = 50;
-    private static final int GC_INTERVAL_MS = 100;
+    private final int baseLatencyMs;
+    private final int gcPauseMs;
+    private final int gcIntervalMs;
 
-    // Readers (requests) blocked by Writer (GC)
+    // RW lock to simulate STW - requests take read lock, GC takes write lock
     private final ReentrantReadWriteLock stwLock = new ReentrantReadWriteLock();
 
-    public ServerNode(String id) {
-        this.id = id;
+    public ServerNode(String id, SimulationConfig config) {
+        this(id, config.baseLatencyMs(), config);
+    }
 
-        // Start Background GC Simulator (Virtual Thread to allow high scalability)
+    public ServerNode(String id, int baseLatencyMs, SimulationConfig config) {
+        this.id = id;
+        this.baseLatencyMs = baseLatencyMs;
+        this.gcPauseMs = config.gcPauseMs();
+        this.gcIntervalMs = config.gcIntervalMs();
+
+        // Background thread for GC simulation
         this.gcThread = Thread.ofVirtual().unstarted(() -> {
             while (running) {
                 try {
-                    // Work period
-                    Thread.sleep(GC_INTERVAL_MS + random.nextInt(1000));
 
-                    // GC Start
+                    Thread.sleep(gcIntervalMs + random.nextInt(1000));
+
                     performGcPause();
 
                 } catch (InterruptedException e) {
@@ -59,11 +58,10 @@ public class ServerNode {
     public void handleRequest() {
         activeRequests.incrementAndGet();
         try {
-            // Processing requires Read Lock.
-            // If GC is active (Write Lock), this BLOCKS.
+            // blocks if GC is running
             stwLock.readLock().lock();
             try {
-                Thread.sleep(BASE_LATENCY_MS + random.nextInt(5));
+                Thread.sleep(baseLatencyMs + random.nextInt(5));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             } finally {
@@ -78,8 +76,8 @@ public class ServerNode {
     private void performGcPause() {
         stwLock.writeLock().lock();
         try {
-            // STOP THE WORLD
-            Thread.sleep(GC_PAUSE_MS);
+            // STW pause
+            Thread.sleep(gcPauseMs);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } finally {
@@ -87,45 +85,34 @@ public class ServerNode {
         }
     }
 
-    /**
-     * Prequal Probe: Returns estimated latency.
-     * Simulates a real network probe: if we can't get a read lock immediately,
-     * it means server is paused or about to pause (Writer waiting).
-     */
+    // Non-blocking probe - returns huge latency if server is mid-GC.
     public com.jprequal.strategies.ProbeResult probe() {
-        // Simulate network probe
+
         if (!stwLock.readLock().tryLock()) {
-            // Server is stalled/GCing
+            // stalled - return 10s penalty
             return new com.jprequal.strategies.ProbeResult(this, activeRequests.get(), 10_000_000_000L,
-                    System.nanoTime()); // 10s penalty
+                    System.nanoTime());
         }
         try {
-            long latencyEst = (long) activeRequests.get() * BASE_LATENCY_MS * 1_000_000L; // ns
+            long latencyEst = (long) activeRequests.get() * baseLatencyMs * 1_000_000L; // ns
             return new com.jprequal.strategies.ProbeResult(this, activeRequests.get(), latencyEst, System.nanoTime());
         } finally {
             stwLock.readLock().unlock();
         }
     }
 
-    /**
-     * Prequal Probe: Returns estimated latency.
-     * Simulates a real network probe: if we can't get a read lock immediately,
-     * it means server is paused or about to pause (Writer waiting).
-     */
+    // Simplified probe returning estimated latency in ms.
     public int getEstimatedLatency() {
         if (!stwLock.readLock().tryLock()) {
-            return 10000; // Probe timed out / Server stalled
+            return 10000; // stalled
         }
         try {
-            // Active Requests * Base Latency
-            return activeRequests.get() * BASE_LATENCY_MS;
+            return activeRequests.get() * baseLatencyMs;
         } finally {
             stwLock.readLock().unlock();
         }
     }
 
-    // For compatibility with PrequalStrategy asking for estimated pending work
-    // We can map this to getEstimatedLatency logic
     public long getEstimatedPendingWork() {
         return getEstimatedLatency();
     }
